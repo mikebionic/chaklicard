@@ -72,17 +72,63 @@ const shuffle = (a) => a.map((v) => [Math.random(), v]).sort((x, y) => x[0] - y[
 /* ------------------------------------------------------------------ */
 /*  2. ФИЗИКА СТИКЕРОВ                                                 */
 /* ------------------------------------------------------------------ */
+let physics = null;
+
+// профиль устройства: расстояние между стикерами, размеры и количество — под экран
+function deviceProfile() {
+  const w = window.innerWidth, h = window.innerHeight;
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  const minSide = Math.min(w, h);
+  const phone  = w <= 640 || (coarse && minSide <= 820);
+  const tablet = !phone && (w <= 1024 || coarse);
+  if (phone)  return { name: "phone",   spacing: 108, sMin: 50, sMax: 90,  max: 16 };
+  if (tablet) return { name: "tablet",  spacing: 128, sMin: 56, sMax: 120, max: 32 };
+  return              { name: "desktop", spacing: 152, sMin: 62, sMax: 158, max: 999 };
+}
+
+function teardownPhysics() {
+  if (!physics) return;
+  Matter.Runner.stop(physics.runner);
+  clearInterval(physics.wind);
+  // снять слушатели мыши/касаний, чтобы не копились при пересборке
+  const m = physics.mouse, el = m.element;
+  el.removeEventListener("mousemove", m.mousemove);
+  el.removeEventListener("mousedown", m.mousedown);
+  el.removeEventListener("mouseup", m.mouseup);
+  el.removeEventListener("touchmove", m.mousemove);
+  el.removeEventListener("touchstart", m.mousedown);
+  el.removeEventListener("touchend", m.mouseup);
+  physics.stage.querySelectorAll(".sticker").forEach((n) => n.remove());
+  physics = null;
+}
+
 function initStickers() {
   if (!window.Matter) return;
-  const { Engine, Runner, Bodies, Body, Composite, Mouse, MouseConstraint, Events } = Matter;
+  layoutStickers();
 
+  let deb;
+  window.addEventListener("resize", () => {
+    clearTimeout(deb);
+    deb = setTimeout(() => {
+      const p = deviceProfile();
+      if (!physics || physics.profileName !== p.name) layoutStickers();  // сменилось устройство/ориентация — пересобрать
+      else physics.buildWalls();                                          // тот же класс — просто подвинуть стены
+    }, 280);
+  });
+  window.addEventListener("orientationchange", () => setTimeout(layoutStickers, 320));
+}
+
+function layoutStickers() {
+  const { Engine, Runner, Bodies, Body, Composite, Mouse, MouseConstraint, Events } = Matter;
   const stage = $("#stage");
   const W = () => window.innerWidth;
   const H = () => window.innerHeight;
+  const prof = deviceProfile();
+
+  teardownPhysics();
 
   const engine = Engine.create();
-  engine.gravity.y = 0;           // невесомость — стикеры дрейфуют
-  engine.gravity.x = 0;
+  engine.gravity.x = engine.gravity.y = 0;   // невесомость — стикеры дрейфуют
   const world = engine.world;
 
   // стены
@@ -101,18 +147,28 @@ function initStickers() {
   };
   buildWalls();
 
-  // тела-стикеры: используем ВСЕ картинки
+  // раскладка по сетке с джиттером — расстояния между стикерами подстроены под устройство
+  const cols = Math.max(2, Math.floor(W() / prof.spacing));
+  const rows = Math.max(2, Math.floor(H() / prof.spacing));
+  const cw = W() / cols, ch = H() / rows;
+  const cells = shuffle(Array.from({ length: cols * rows }, (_, i) => i));
+
   const all = shuffle([...state.manifest.stickers, ...state.manifest.photos]);
-  const cap = W() < 560 ? 34 : all.length;         // на телефоне чуть меньше — ради плавности
-  const pool = all.slice(0, cap);
+  const count = Math.min(all.length, prof.max, cells.length);
+  const pool = all.slice(0, count);
   const items = [];
 
-  // добавляем стикер только после загрузки — чтобы знать реальные пропорции (без искажения)
-  function addSticker(file) {
+  // добавляем стикер после загрузки — чтобы знать реальные пропорции (без искажения)
+  function addSticker(file, cellIdx) {
+    const col = cellIdx % cols, row = (cellIdx / cols) | 0;
+    const cx = (col + 0.5) * cw + (Math.random() - 0.5) * cw * 0.45;   // джиттер в пределах ячейки
+    const cy = (row + 0.5) * ch + (Math.random() - 0.5) * ch * 0.45;
+
     const probe = new Image();
     probe.onload = () => {
+      if (!physics || physics.engine !== engine) return;   // раскладку уже пересобрали
       const ratio = probe.naturalWidth / probe.naturalHeight || 1;
-      const longSide = 62 + Math.random() * 96;    // разный масштаб: ~62–158px
+      const longSide = prof.sMin + Math.random() * (prof.sMax - prof.sMin);
       let w, h;
       if (ratio >= 1) { w = longSide; h = longSide / ratio; }
       else            { h = longSide; w = longSide * ratio; }
@@ -121,7 +177,7 @@ function initStickers() {
       el.className = "sticker";
       el.style.width = w + "px";
       el.style.height = h + "px";
-      el.style.setProperty("--wob", (3.5 + Math.random() * 4).toFixed(2) + "s"); // разный ритм «дыхания»
+      el.style.setProperty("--wob", (3.5 + Math.random() * 4).toFixed(2) + "s");
       el.style.animationDelay = (Math.random() * 0.5).toFixed(2) + "s";
       const img = document.createElement("img");
       img.src = "assets/stickers/" + file;
@@ -129,31 +185,26 @@ function initStickers() {
       el.appendChild(img);
       stage.appendChild(el);
 
-      const body = Bodies.rectangle(
-        60 + Math.random() * (W() - 120),
-        60 + Math.random() * (H() - 120),
-        w * 0.8, h * 0.8,
-        { restitution: 0.9, frictionAir: 0.012, friction: 0,
-          angle: (Math.random() - 0.5) * 0.9,
-          chamfer: { radius: Math.min(w, h) * 0.18 } }
-      );
-      Body.setVelocity(body, { x: (Math.random() - 0.5) * 3, y: (Math.random() - 0.5) * 3 });
-      Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.06); // сами крутятся
+      const body = Bodies.rectangle(cx, cy, w * 0.8, h * 0.8, {
+        restitution: 0.9, frictionAir: 0.012, friction: 0,
+        angle: (Math.random() - 0.5) * 0.9,
+        chamfer: { radius: Math.min(w, h) * 0.18 },
+      });
+      Body.setVelocity(body, { x: (Math.random() - 0.5) * 2.4, y: (Math.random() - 0.5) * 2.4 });
+      Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.06);   // сами крутятся
       Composite.add(world, body);
       items.push({ el, body, w, h });
     };
     probe.src = "assets/stickers/" + file;
   }
-  pool.forEach(addSticker);
+  pool.forEach((f, i) => addSticker(f, cells[i]));
 
   // мышь / касание — хватать и кидать
   const mouse = Mouse.create(document.body);
   const mc = MouseConstraint.create(engine, {
-    mouse,
-    constraint: { stiffness: 0.18, render: { visible: false } },
+    mouse, constraint: { stiffness: 0.18, render: { visible: false } },
   });
   Composite.add(world, mc);
-  // не блокировать скролл страницы жестами (у нас его и нет, но на всякий)
   mouse.element.removeEventListener("wheel", mouse.mousewheel);
 
   // рендер DOM по позициям тел
@@ -165,8 +216,8 @@ function initStickers() {
     }
   });
 
-  // постоянный мягкий «ветер», чтобы не застывали
-  setInterval(() => {
+  // мягкий «ветер», чтобы не застывали
+  const wind = setInterval(() => {
     for (const it of items) {
       const sp = Math.hypot(it.body.velocity.x, it.body.velocity.y);
       if (sp < 1.4) {
@@ -178,8 +229,9 @@ function initStickers() {
     }
   }, 1600);
 
-  Runner.run(Runner.create(), engine);
-  window.addEventListener("resize", buildWalls);
+  const runner = Runner.create();
+  Runner.run(runner, engine);
+  physics = { runner, engine, stage, mouse, buildWalls, wind, profileName: prof.name };
 }
 
 /* ------------------------------------------------------------------ */
