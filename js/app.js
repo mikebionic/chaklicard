@@ -5,11 +5,50 @@
 
 const $ = (s) => document.querySelector(s);
 
+/* ===================================================================
+   КОНФИГ ВАЛИДАЦИИ (слой безопасности)
+   VALIDATION_ENDPOINT — адрес Cloudflare Worker'а.
+   Пусто ("") => локальный dev-режим: пускаем всех, играем локальный трек.
+   Код карты приходит из URL (#c=... или ?c=...), в исходниках его НЕТ.
+   =================================================================== */
+const VALIDATION_ENDPOINT = ""; // напр. "https://chaklicard.<акк>.workers.dev"
+
+// код из NFC-карты: https://.../#c=CODE  (fragment не попадает в логи/Referer)
+function getCode() {
+  const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const q = new URLSearchParams(location.search);
+  return (h.get("c") || q.get("c") || "").trim();
+}
+
+// спрашиваем бэкенд: валиден ли код, и что показывать.
+// Ответ (динамика): { ok, title, by, theme, track }  track = URL для стрима через Worker.
+async function validate(code) {
+  if (!VALIDATION_ENDPOINT) {
+    // локальная разработка — без бэкенда
+    return { ok: true, dev: true, title: "nobody else", by: "LANY", theme: null, track: "assets/track.mp3" };
+  }
+  try {
+    const r = await fetch(VALIDATION_ENDPOINT + "/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    if (!r.ok) return { ok: false, status: r.status };
+    const cfg = await r.json();
+    // трек стримится через Worker с тем же кодом — прямой ссылки на хранилище нет
+    if (cfg.ok && !cfg.track) cfg.track = VALIDATION_ENDPOINT + "/track?c=" + encodeURIComponent(code);
+    return cfg;
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 const state = {
   playing: false,
   muted: false,
   audio: null,      // { play, pause, seek(t), duration(), current(), setMute } — единый интерфейс
   manifest: { stickers: [], photos: [] },
+  cfg: null,
 };
 
 /* ------------------------------------------------------------------ */
@@ -153,9 +192,9 @@ async function trackExists() {
   } catch { return false; }
 }
 
-// реальный трек
-function makeHowl() {
-  const howl = new Howl({ src: ["assets/track.mp3"], html5: true, loop: true, volume: 0.9 });
+// реальный трек (src приходит из конфига: локальный файл или URL Worker'а)
+function makeHowl(src) {
+  const howl = new Howl({ src: [src], html5: true, loop: true, volume: 0.9 });
   return {
     play: () => howl.play(),
     pause: () => howl.pause(),
@@ -297,17 +336,40 @@ function wireTheme() {
   };
 }
 
+function lockCover(msg) {
+  $("#cover").classList.add("locked");
+  document.querySelector(".sleeve .kicker").textContent = "chaklicard";
+  document.querySelector(".sleeve h2").textContent = "invalid card";
+  $("#enter").style.display = "none";
+  document.querySelector(".sleeve .hint").textContent = msg || "код не распознан";
+}
+
 async function boot() {
   wireTheme();
   await loadManifest();
   initStickers();
 
-  const real = await trackExists();
-  // аудио создаём по клику (требование браузеров), поэтому только помечаем тип
+  // валидация кода из URL карты
+  const code = getCode();
+  const cfg = await validate(code);
+  state.cfg = cfg;
+
+  if (!cfg.ok) {
+    lockCover(cfg.status === 404 || cfg.status === 403 ? "карта не найдена или отозвана" : "нет связи с сервером");
+    return;
+  }
+
+  // динамика: применяем то, что вернул бэкенд
+  if (cfg.theme) { document.body.setAttribute("data-theme", cfg.theme); }
+  if (cfg.title) { $("#trackTitle").textContent = cfg.title; }
+  if (cfg.by)    { $("#trackBy").textContent = cfg.by; }
+
+  const trackSrc = cfg.track;
+  const useReal = !!trackSrc && (VALIDATION_ENDPOINT || await trackExists());
+
   const enter = $("#enter");
   enter.onclick = async () => {
-    state.audio = real ? makeHowl() : makeSynth();
-    if (real) { $("#trackTitle").textContent = "side a"; }
+    state.audio = useReal ? makeHowl(trackSrc) : makeSynth();
     wireControls();
     $("#cover").classList.add("gone");
     $("#player").classList.remove("hidden");
