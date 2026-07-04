@@ -1,7 +1,8 @@
-# приватный контент не держим в репозитории (уедет в хранилище за Worker)
+# плейнтекстовый трек НЕ держим в репо (в публичный доступ уходит только зашифрованный track.enc)
 assets/track.mp3
 assets/track.mp4
-assets/track.*
+assets/track.wav
+assets/track.ogg
 
 # служебное
 .DS_Store

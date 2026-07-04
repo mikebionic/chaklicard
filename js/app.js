@@ -1,45 +1,72 @@
 /* chaklicard — витрина
    Слои: (1) физика стикеров (Matter.js), (2) винил, (3) аудио.
-   Аудио: если рядом есть assets/track.mp3 — играем его (Howler),
-   иначе синтезируем мягкую lo-fi петлю через WebAudio, чтобы «пластинка играла». */
+
+   Защита (двойная, всё на клиенте, без сервера):
+     • Гейт входа — токен с карты хэшируется (SHA-256) и сверяется с PASS_HASH.
+       В исходниках лежит только хэш: по нему сам токен не восстановить.
+     • Контент — трек зашифрован AES-GCM ключом, выведенным из того же токена
+       (PBKDF2). Файл assets/track.enc публичный, но без токена он бесполезен.
+   Токен нигде в репозитории не хранится — приходит из URL карты (/11/?t=TOKEN). */
 
 const $ = (s) => document.querySelector(s);
+const BASE = window.__BASE__ || "";   // карта в /11/ => ассеты на уровень выше
 
 /* ===================================================================
-   КОНФИГ ВАЛИДАЦИИ (слой безопасности)
-   VALIDATION_ENDPOINT — адрес Cloudflare Worker'а.
-   Пусто ("") => локальный dev-режим: пускаем всех, играем локальный трек.
-   Код карты приходит из URL (#c=... или ?c=...), в исходниках его НЕТ.
+   СЛОЙ БЕЗОПАСНОСТИ
+   Формат track.enc:  salt(16) + iv(12) + ciphertext(+tag)
    =================================================================== */
-const VALIDATION_ENDPOINT = ""; // напр. "https://chaklicard.<акк>.workers.dev"
+const PBKDF2_ITER = 150000;
 
-// код из NFC-карты: https://.../#c=CODE  (fragment не попадает в логи/Referer)
-function getCode() {
-  const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+// SHA-256(токен) в hex — сверяем с ним. Это НЕ сам токен, обратно не разворачивается.
+const PASS_HASH = "17da7c9aea717e13ea79f0663a505279da201955f8f4547305d3c89e90a84348";
+
+// токен с NFC-карты: /11/?t=TOKEN  (принимаем и #t= как запасной вариант)
+function getToken() {
   const q = new URLSearchParams(location.search);
-  return (h.get("c") || q.get("c") || "").trim();
+  const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const t = (q.get("t") || h.get("t") || "").trim();
+  // подчистить URL, чтобы токен не мелькал в адресной строке / Referer
+  if (t) history.replaceState(null, "", location.pathname);
+  return t;
 }
 
-// спрашиваем бэкенд: валиден ли код, и что показывать.
-// Ответ (динамика): { ok, title, by, theme, track }  track = URL для стрима через Worker.
-async function validate(code) {
-  if (!VALIDATION_ENDPOINT) {
-    // локальная разработка — без бэкенда
-    return { ok: true, dev: true, title: "nobody else", by: "LANY", theme: null, track: "assets/track.mp3" };
-  }
+async function sha256hex(str) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function deriveKey(token, salt) {
+  const base = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(token), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: PBKDF2_ITER, hash: "SHA-256" },
+    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+}
+
+// вернёт: { ok:true, track:<blobURL> } | { ok:false, reason } | { missing:true }
+async function unlock(token) {
+  if (!token) return { ok: false, reason: "no-code" };
+
+  // 1) быстрый гейт по хэшу — без скачивания трека
+  const h = await sha256hex(token);
+  if (h !== PASS_HASH) return { ok: false, reason: "bad-code" };
+
+  // 2) достаём и расшифровываем трек
+  let buf;
   try {
-    const r = await fetch(VALIDATION_ENDPOINT + "/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-    if (!r.ok) return { ok: false, status: r.status };
-    const cfg = await r.json();
-    // трек стримится через Worker с тем же кодом — прямой ссылки на хранилище нет
-    if (cfg.ok && !cfg.track) cfg.track = VALIDATION_ENDPOINT + "/track?c=" + encodeURIComponent(code);
-    return cfg;
-  } catch (e) {
-    return { ok: false, error: String(e) };
+    const res = await fetch(BASE + "assets/track.enc", { cache: "no-store" });
+    if (!res.ok) return { missing: true };            // ещё не зашифрован (dev)
+    buf = new Uint8Array(await res.arrayBuffer());
+  } catch { return { missing: true }; }
+
+  try {
+    const salt = buf.slice(0, 16), iv = buf.slice(16, 28), ct = buf.slice(28);
+    const key = await deriveKey(token, salt);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+    const url = URL.createObjectURL(new Blob([plain], { type: "audio/mpeg" }));
+    return { ok: true, track: url };
+  } catch {
+    return { ok: false, reason: "bad-code" };
   }
 }
 
@@ -56,14 +83,14 @@ const state = {
 /* ------------------------------------------------------------------ */
 async function loadManifest() {
   try {
-    const r = await fetch("assets/manifest.json", { cache: "no-store" });
+    const r = await fetch(BASE + "assets/manifest.json", { cache: "no-store" });
     state.manifest = await r.json();
   } catch (e) {
     console.warn("[chaklicard] манифест не найден", e);
   }
   const pool = state.manifest.stickers.length ? state.manifest.stickers : state.manifest.photos;
   // лейбл винила — случайный арт
-  if (pool.length) $("#labelArt").src = "assets/stickers/" + pick(pool);
+  if (pool.length) $("#labelArt").src = BASE + "assets/stickers/" + pick(pool);
 }
 
 const pick = (a) => a[(Math.random() * a.length) | 0];
@@ -180,7 +207,7 @@ function layoutStickers() {
       el.style.setProperty("--wob", (3.5 + Math.random() * 4).toFixed(2) + "s");
       el.style.animationDelay = (Math.random() * 0.5).toFixed(2) + "s";
       const img = document.createElement("img");
-      img.src = "assets/stickers/" + file;
+      img.src = BASE + "assets/stickers/" + file;
       img.alt = "";
       el.appendChild(img);
       stage.appendChild(el);
@@ -195,7 +222,7 @@ function layoutStickers() {
       Composite.add(world, body);
       items.push({ el, body, w, h });
     };
-    probe.src = "assets/stickers/" + file;
+    probe.src = BASE + "assets/stickers/" + file;
   }
   pool.forEach((f, i) => addSticker(f, cells[i]));
 
@@ -237,14 +264,7 @@ function layoutStickers() {
 /* ------------------------------------------------------------------ */
 /*  3. АУДИО                                                          */
 /* ------------------------------------------------------------------ */
-async function trackExists() {
-  try {
-    const r = await fetch("assets/track.mp3", { method: "HEAD" });
-    return r.ok;
-  } catch { return false; }
-}
-
-// реальный трек (src приходит из конфига: локальный файл или URL Worker'а)
+// реальный трек (src — blob-URL расшифрованного mp3)
 function makeHowl(src) {
   const howl = new Howl({ src: [src], html5: true, loop: true, volume: 0.9 });
   return {
@@ -401,27 +421,26 @@ async function boot() {
   await loadManifest();
   initStickers();
 
-  // валидация кода из URL карты
-  const code = getCode();
-  const cfg = await validate(code);
-  state.cfg = cfg;
+  // токен из URL карты: гейт по хэшу + расшифровка трека
+  const token = getToken();
+  const res = await unlock(token);
 
-  if (!cfg.ok) {
-    lockCover(cfg.status === 404 || cfg.status === 403 ? "карта не найдена или отозвана" : "нет связи с сервером");
+  let trackSrc = null;   // blob-URL расшифрованного трека, либо null => синт-заглушка
+  if (res.ok) {
+    trackSrc = res.track;
+    $("#trackTitle").textContent = "nobody else";
+    $("#trackBy").textContent = "LANY";
+  } else if (res.missing) {
+    // track.enc ещё не создан (локальная разработка) — играем синтезированную петлю
+    trackSrc = null;
+  } else {
+    lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
     return;
   }
 
-  // динамика: применяем то, что вернул бэкенд
-  if (cfg.theme) { document.body.setAttribute("data-theme", cfg.theme); }
-  if (cfg.title) { $("#trackTitle").textContent = cfg.title; }
-  if (cfg.by)    { $("#trackBy").textContent = cfg.by; }
-
-  const trackSrc = cfg.track;
-  const useReal = !!trackSrc && (VALIDATION_ENDPOINT || await trackExists());
-
   const enter = $("#enter");
   enter.onclick = async () => {
-    state.audio = useReal ? makeHowl(trackSrc) : makeSynth();
+    state.audio = trackSrc ? makeHowl(trackSrc) : makeSynth();
     wireControls();
     $("#cover").classList.add("gone");
     $("#player").classList.remove("hidden");

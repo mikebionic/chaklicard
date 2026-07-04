@@ -1,77 +1,18 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="tk">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>· chaklicard ·</title>
-
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-
-<link rel="stylesheet" href="css/style.css" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Salam, dünýä</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       background:#fff;color:#111}
+  h1{font-weight:600;font-size:clamp(28px,7vw,64px);letter-spacing:-.01em}
+</style>
 </head>
 <body>
-
-<!-- зерно / бумага -->
-<div class="grain" aria-hidden="true"></div>
-<div class="vignette" aria-hidden="true"></div>
-
-<!-- переключатель темы -->
-<button id="themeToggle" title="сменить настроение">◑</button>
-
-<!-- слой физики: стикеры летают тут -->
-<div id="stage" aria-hidden="true"></div>
-
-<!-- проигрыватель -->
-<main id="player" class="hidden">
-  <div class="deck">
-    <div class="turntable">
-      <div class="platter">
-        <div class="vinyl">
-          <div class="grooves"></div>
-          <div class="label"><img id="labelArt" alt="" /></div>
-          <div class="spindle"></div>
-        </div>
-      </div>
-      <div class="tonearm"><span class="arm"></span><span class="head"></span></div>
-    </div>
-
-    <section class="readout">
-      <p class="eyebrow">NOW SPINNING — SIDE A</p>
-      <h1 class="title" id="trackTitle">untitled mix</h1>
-      <p class="byline" id="trackBy">for someone who has the card</p>
-
-      <div class="scrub">
-        <span class="t" id="tCur">0:00</span>
-        <div class="bar" id="bar"><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
-        <span class="t" id="tDur">--:--</span>
-      </div>
-
-      <div class="controls">
-        <button class="ctl" id="btnPrev" title="в начало">⏮</button>
-        <button class="ctl big" id="btnPlay" title="play / pause">►</button>
-        <button class="ctl" id="btnMute" title="mute">◍</button>
-      </div>
-    </section>
-  </div>
-</main>
-
-<!-- обложка / вход (обходит блокировку автоплея) -->
-<div id="cover">
-  <div class="sleeve">
-    <div class="hole"></div>
-    <p class="kicker">a little mixtape</p>
-    <h2>press to play</h2>
-    <button id="enter">▶ open the card</button>
-    <p class="hint">со звуком · надень наушники</p>
-  </div>
-</div>
-
-<!-- Matter.js для физики стикеров -->
-<script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
-<!-- Howler для аудио (используется, когда появится реальный трек) -->
-<script src="https://cdn.jsdelivr.net/npm/howler@2.2.4/dist/howler.min.js"></script>
-<script src="js/app.js"></script>
+  <h1>Salam, dünýä</h1>
 </body>
 </html>
