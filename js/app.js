@@ -421,31 +421,38 @@ async function boot() {
   await loadManifest();
   initStickers();
 
-  // токен из URL карты: гейт по хэшу + расшифровка трека
+  // токен из URL карты. Скачивание/расшифровка идут в фоне,
+  // а клик вешаем сразу — иначе кнопка мертва, пока качается track.enc.
   const token = getToken();
-  const res = await unlock(token);
-
-  let trackSrc = null;   // blob-URL расшифрованного трека, либо null => синт-заглушка
-  if (res.ok) {
-    trackSrc = res.track;
-    $("#trackTitle").textContent = "nobody else";
-    $("#trackBy").textContent = "LANY";
-  } else if (res.missing) {
-    // track.enc ещё не создан (локальная разработка) — играем синтезированную петлю
-    trackSrc = null;
-  } else {
-    lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
-    return;
-  }
+  const unlockP = unlock(token);
 
   const enter = $("#enter");
   enter.onclick = async () => {
-    state.audio = trackSrc ? makeHowl(trackSrc) : makeSynth();
+    enter.disabled = true;
+    enter.textContent = "⏳ открываю…";
+    const res = await unlockP;
+
+    if (!res.ok && !res.missing) {
+      lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
+      return;
+    }
+    if (res.ok) {
+      $("#trackTitle").textContent = "nobody else";
+      $("#trackBy").textContent = "LANY";
+    }
+    // res.missing => track.enc нет (локальная разработка) — синт-заглушка
+    state.audio = res.ok ? makeHowl(res.track) : makeSynth();
     wireControls();
     $("#cover").classList.add("gone");
     $("#player").classList.remove("hidden");
     setPlaying(true);       // играет сразу после входа
   };
+
+  // токен неверный/отсутствует — лочим обложку, не дожидаясь клика
+  const res = await unlockP;
+  if (!res.ok && !res.missing) {
+    lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
+  }
 }
 
 document.addEventListener("DOMContentLoaded", boot);
