@@ -44,19 +44,37 @@ async function deriveKey(token, salt) {
 }
 
 // вернёт: { ok:true, track:<blobURL> } | { ok:false, reason } | { missing:true }
-async function unlock(token) {
+// onProgress(получено, всего) дёргается по мере скачивания track.enc
+async function unlock(token, onProgress) {
   if (!token) return { ok: false, reason: "no-code" };
 
   // 1) быстрый гейт по хэшу — без скачивания трека
   const h = await sha256hex(token);
   if (h !== PASS_HASH) return { ok: false, reason: "bad-code" };
 
-  // 2) достаём и расшифровываем трек
+  // 2) достаём и расшифровываем трек (стримим, чтобы показывать прогресс)
   let buf;
   try {
-    const res = await fetch(BASE + "assets/track.enc", { cache: "no-store" });
+    const res = await fetch(BASE + "assets/track.enc");
     if (!res.ok) return { missing: true };            // ещё не зашифрован (dev)
-    buf = new Uint8Array(await res.arrayBuffer());
+    const total = +res.headers.get("Content-Length") || 0;
+    if (res.body && total) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+        if (onProgress) onProgress(got, total);
+      }
+      buf = new Uint8Array(got);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+    } else {
+      buf = new Uint8Array(await res.arrayBuffer());
+    }
   } catch { return { missing: true }; }
 
   try {
@@ -226,8 +244,10 @@ function layoutStickers() {
   }
   pool.forEach((f, i) => addSticker(f, cells[i]));
 
-  // мышь / касание — хватать и кидать
-  const mouse = Mouse.create(document.body);
+  // мышь / касание — хватать и кидать.
+  // ВАЖНО: слушаем #stage, а не document.body — обработчики Matter делают
+  // preventDefault на touchstart и убивали tap-клики по кнопкам на телефоне.
+  const mouse = Mouse.create(stage);
   const mc = MouseConstraint.create(engine, {
     mouse, constraint: { stiffness: 0.18, render: { visible: false } },
   });
@@ -266,7 +286,8 @@ function layoutStickers() {
 /* ------------------------------------------------------------------ */
 // реальный трек (src — blob-URL расшифрованного mp3)
 function makeHowl(src) {
-  const howl = new Howl({ src: [src], html5: true, loop: true, volume: 0.9 });
+  // format обязателен: src — blob-URL без расширения, иначе Howler молча не грузит
+  const howl = new Howl({ src: [src], format: ["mp3"], html5: true, loop: true, volume: 0.9 });
   return {
     play: () => howl.play(),
     pause: () => howl.pause(),
@@ -424,13 +445,30 @@ async function boot() {
   // токен из URL карты. Скачивание/расшифровка идут в фоне,
   // а клик вешаем сразу — иначе кнопка мертва, пока качается track.enc.
   const token = getToken();
-  const unlockP = unlock(token);
+  const dl = { got: 0, total: 0 };
+  const unlockP = unlock(token, (got, total) => { dl.got = got; dl.total = total; });
 
   const enter = $("#enter");
   enter.onclick = async () => {
     enter.disabled = true;
-    enter.textContent = "⏳ открываю…";
-    const res = await unlockP;
+    // пока трек качается — показываем реальный процент, а не немую кнопку
+    const tick = setInterval(() => {
+      enter.textContent = dl.total
+        ? `⏳ ${Math.round((dl.got / dl.total) * 100)}%`
+        : "⏳ открываю…";
+    }, 150);
+
+    let res;
+    try {
+      res = await unlockP;
+    } catch (e) {
+      clearInterval(tick);
+      enter.disabled = false;
+      enter.textContent = "⚠ " + (e && e.message ? e.message : "ошибка — нажми ещё раз");
+      console.error("[chaklicard] unlock:", e);
+      return;
+    }
+    clearInterval(tick);
 
     if (!res.ok && !res.missing) {
       lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
@@ -449,10 +487,11 @@ async function boot() {
   };
 
   // токен неверный/отсутствует — лочим обложку, не дожидаясь клика
-  const res = await unlockP;
-  if (!res.ok && !res.missing) {
-    lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
-  }
+  unlockP.then((res) => {
+    if (!res.ok && !res.missing) {
+      lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
+    }
+  }).catch(() => {});   // ошибку покажет обработчик клика
 }
 
 document.addEventListener("DOMContentLoaded", boot);
