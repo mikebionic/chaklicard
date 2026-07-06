@@ -52,11 +52,18 @@ async function unlock(token, onProgress) {
   const h = await sha256hex(token);
   if (h !== PASS_HASH) return { ok: false, reason: "bad-code" };
 
-  // 2) достаём и расшифровываем трек (стримим, чтобы показывать прогресс)
+  // 2) достаём и расшифровываем трек (стримим, чтобы показывать прогресс).
+  //    Сторожевой таймер: если данные перестали идти дольше 25с — обрываем,
+  //    чтобы кнопка не висела вечно на «открываю…», а показала ошибку.
+  const ac = new AbortController();
+  let watchdog;
+  const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(() => ac.abort(), 25000); };
   let buf;
   try {
-    const res = await fetch(BASE + "assets/track.enc");
-    if (!res.ok) return { missing: true };            // ещё не зашифрован (dev)
+    arm();
+    const res = await fetch(BASE + "assets/track.enc", { signal: ac.signal });
+    if (res.status === 404) { clearTimeout(watchdog); return { missing: true }; } // dev: ещё не зашифрован
+    if (!res.ok) throw new Error("HTTP " + res.status);
     const total = +res.headers.get("Content-Length") || 0;
     if (res.body && total) {
       const reader = res.body.getReader();
@@ -65,6 +72,7 @@ async function unlock(token, onProgress) {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        arm();                                          // пошли данные — продлеваем таймер
         chunks.push(value);
         got += value.length;
         if (onProgress) onProgress(got, total);
@@ -75,7 +83,11 @@ async function unlock(token, onProgress) {
     } else {
       buf = new Uint8Array(await res.arrayBuffer());
     }
-  } catch { return { missing: true }; }
+    clearTimeout(watchdog);
+  } catch (e) {
+    clearTimeout(watchdog);
+    throw new Error(e.name === "AbortError" ? "сеть тормозит — нажми ещё раз" : "нет сети — нажми ещё раз");
+  }
 
   try {
     const salt = buf.slice(0, 16), iv = buf.slice(16, 28), ct = buf.slice(28);
