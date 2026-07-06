@@ -1,22 +1,18 @@
 /* chaklicard — витрина
    Слои: (1) физика стикеров (Matter.js), (2) винил, (3) аудио.
 
-   Защита (двойная, всё на клиенте, без сервера):
-     • Гейт входа — токен с карты хэшируется (SHA-256) и сверяется с PASS_HASH.
-       В исходниках лежит только хэш: по нему сам токен не восстановить.
-     • Контент — трек зашифрован AES-GCM ключом, выведенным из того же токена
-       (PBKDF2). Файл assets/track.enc публичный, но без токена он бесполезен.
-   Токен нигде в репозитории не хранится — приходит из URL карты (/11/?t=TOKEN). */
+   Гейт: токен с карты хэшируется (SHA-256) и сверяется с PASS_HASH — открывает
+   саму витрину. В исходниках лежит только хэш, сам токен не восстановить.
+   Токен приходит из URL карты (/11/?t=TOKEN) и в репозитории не хранится.
+   Трек — обычный mp3 (assets/track.mp3): Howler стримит его сразу, без ожидания
+   полной загрузки. Файл публичный — токен защищает страницу, не сам файл. */
 
 const $ = (s) => document.querySelector(s);
 const BASE = window.__BASE__ || "";   // карта в /11/ => ассеты на уровень выше
 
 /* ===================================================================
-   СЛОЙ БЕЗОПАСНОСТИ
-   Формат track.enc:  salt(16) + iv(12) + ciphertext(+tag)
+   ГЕЙТ ВХОДА
    =================================================================== */
-const PBKDF2_ITER = 150000;
-
 // SHA-256(токен) в hex — сверяем с ним. Это НЕ сам токен, обратно не разворачивается.
 const PASS_HASH = "17da7c9aea717e13ea79f0663a505279da201955f8f4547305d3c89e90a84348";
 
@@ -35,69 +31,11 @@ async function sha256hex(str) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function deriveKey(token, salt) {
-  const base = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(token), "PBKDF2", false, ["deriveKey"]);
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: PBKDF2_ITER, hash: "SHA-256" },
-    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-}
-
-// вернёт: { ok:true, track:<blobURL> } | { ok:false, reason } | { missing:true }
-// onProgress(получено, всего) дёргается по мере скачивания track.enc
-async function unlock(token, onProgress) {
+// проверка токена: сверяем хэш. Быстро, без сети.
+async function gateCheck(token) {
   if (!token) return { ok: false, reason: "no-code" };
-
-  // 1) быстрый гейт по хэшу — без скачивания трека
   const h = await sha256hex(token);
-  if (h !== PASS_HASH) return { ok: false, reason: "bad-code" };
-
-  // 2) достаём и расшифровываем трек (стримим, чтобы показывать прогресс).
-  //    Сторожевой таймер: если данные перестали идти дольше 25с — обрываем,
-  //    чтобы кнопка не висела вечно на «открываю…», а показала ошибку.
-  const ac = new AbortController();
-  let watchdog;
-  const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(() => ac.abort(), 25000); };
-  let buf;
-  try {
-    arm();
-    const res = await fetch(BASE + "assets/track.enc", { signal: ac.signal });
-    if (res.status === 404) { clearTimeout(watchdog); return { missing: true }; } // dev: ещё не зашифрован
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const total = +res.headers.get("Content-Length") || 0;
-    if (res.body && total) {
-      const reader = res.body.getReader();
-      const chunks = [];
-      let got = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        arm();                                          // пошли данные — продлеваем таймер
-        chunks.push(value);
-        got += value.length;
-        if (onProgress) onProgress(got, total);
-      }
-      buf = new Uint8Array(got);
-      let off = 0;
-      for (const c of chunks) { buf.set(c, off); off += c.length; }
-    } else {
-      buf = new Uint8Array(await res.arrayBuffer());
-    }
-    clearTimeout(watchdog);
-  } catch (e) {
-    clearTimeout(watchdog);
-    throw new Error(e.name === "AbortError" ? "сеть тормозит — нажми ещё раз" : "нет сети — нажми ещё раз");
-  }
-
-  try {
-    const salt = buf.slice(0, 16), iv = buf.slice(16, 28), ct = buf.slice(28);
-    const key = await deriveKey(token, salt);
-    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
-    const url = URL.createObjectURL(new Blob([plain], { type: "audio/mpeg" }));
-    return { ok: true, track: url };
-  } catch {
-    return { ok: false, reason: "bad-code" };
-  }
+  return h === PASS_HASH ? { ok: true } : { ok: false, reason: "bad-code" };
 }
 
 const state = {
@@ -454,56 +392,26 @@ async function boot() {
   await loadManifest();
   initStickers();
 
-  // токен из URL карты. Скачивание/расшифровка идут в фоне,
-  // а клик вешаем сразу — иначе кнопка мертва, пока качается track.enc.
+  // токен из URL карты — гейт по хэшу (быстро, без сети)
   const token = getToken();
-  const dl = { got: 0, total: 0 };
-  const unlockP = unlock(token, (got, total) => { dl.got = got; dl.total = total; });
+  const gate = await gateCheck(token);
+  if (!gate.ok) {
+    lockCover(gate.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
+    return;
+  }
+  $("#trackTitle").textContent = "nobody else";
+  $("#trackBy").textContent = "LANY";
 
+  // клик синхронно запускает воспроизведение — Howler стримит mp3 сразу,
+  // play() внутри жеста => не блокируется автоплей-политикой iOS.
   const enter = $("#enter");
-  enter.onclick = async () => {
-    enter.disabled = true;
-    // пока трек качается — показываем реальный процент, а не немую кнопку
-    const tick = setInterval(() => {
-      enter.textContent = dl.total
-        ? `⏳ ${Math.round((dl.got / dl.total) * 100)}%`
-        : "⏳ открываю…";
-    }, 150);
-
-    let res;
-    try {
-      res = await unlockP;
-    } catch (e) {
-      clearInterval(tick);
-      enter.disabled = false;
-      enter.textContent = "⚠ " + (e && e.message ? e.message : "ошибка — нажми ещё раз");
-      console.error("[chaklicard] unlock:", e);
-      return;
-    }
-    clearInterval(tick);
-
-    if (!res.ok && !res.missing) {
-      lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
-      return;
-    }
-    if (res.ok) {
-      $("#trackTitle").textContent = "nobody else";
-      $("#trackBy").textContent = "LANY";
-    }
-    // res.missing => track.enc нет (локальная разработка) — синт-заглушка
-    state.audio = res.ok ? makeHowl(res.track) : makeSynth();
+  enter.onclick = () => {
+    state.audio = makeHowl(BASE + "assets/track.mp3");
     wireControls();
     $("#cover").classList.add("gone");
     $("#player").classList.remove("hidden");
-    setPlaying(true);       // играет сразу после входа
+    setPlaying(true);
   };
-
-  // токен неверный/отсутствует — лочим обложку, не дожидаясь клика
-  unlockP.then((res) => {
-    if (!res.ok && !res.missing) {
-      lockCover(res.reason === "no-code" ? "поднеси карту — нужен код" : "код неверный");
-    }
-  }).catch(() => {});   // ошибку покажет обработчик клика
 }
 
 document.addEventListener("DOMContentLoaded", boot);

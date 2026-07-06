@@ -1,8 +1,4 @@
-# плейнтекстовый трек НЕ держим в репо (в публичный доступ уходит только зашифрованный track.enc)
-assets/track.mp3
-assets/track.mp4
-assets/track.wav
-assets/track.ogg
+# трек лежит обычным mp3 (assets/track.mp3) — коммитим, чтобы Howler стримил сразу
 
 # служебное
 .DS_Store
